@@ -12,7 +12,7 @@
 
 import os, asyncio, json, threading, subprocess, time, queue, random
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Optional, Callable
 
 from rich.console import Console
 from rich.panel import Panel
@@ -72,6 +72,22 @@ _last_sent_text: str = ""
 _last_sent_time: float = 0.0
 _last_sent_per_chat: dict[str, tuple[str, float]] = {}
 _ECHO_COOLDOWN_SEC = 10.0  # innerhalb dieses Fensters niemals auf eigenen Text antworten
+
+_context_update_handler: Optional[Callable[[str, str, str], None]] = None
+
+
+def register_context_update_handler(handler: Optional[Callable[[str, str, str], None]]) -> None:
+    global _context_update_handler
+    _context_update_handler = handler
+
+
+def _notify_context_update(title: str, url: str, text: str) -> None:
+    if not _context_update_handler:
+        return
+    try:
+        _context_update_handler(title, url, text)
+    except Exception:
+        pass
 
 AUTO_REPLY_TOKEN = "__AUTO_REPLY__"
 AUTO_REPLY_DRAFT_TOKEN = "__AUTO_REPLY_DRAFT__"
@@ -293,6 +309,11 @@ async def cmd_lese(page):
     page = await _ensure_active_page(page)
     data = await read_page(page)
     snippet = shorten(data["text"], 1500)
+    _notify_context_update(
+        data["title"] or "(ohne Titel)",
+        data["url"],
+        snippet or "[kein sichtbarer Text]",
+    )
     console.print(Panel.fit(
         f"[bold]{data['title'] or '(ohne Titel)'}[/bold]\n[url]{data['url']}[/url]\n\n{snippet or '[kein sichtbarer Text]'}",
         title="Seite lesen", border_style="cyan"
@@ -943,6 +964,14 @@ async def compose_chat_reply(page, planner: "LLMPlanner", instruction: str) -> O
     if snippet_source and chat_identity:
         snippet_source = f"Chat mit {chat_identity}:\n{snippet_source}"
 
+    if snippet_source:
+        try:
+            current_url = page.url
+        except Exception:
+            current_url = ""
+        context_title = chat_identity or "Aktueller Kontext"
+        _notify_context_update(context_title, current_url, snippet_source)
+
     if not latest and not snippet_source:
         return None
 
@@ -1029,10 +1058,16 @@ class GUI:
         self._history = tk.Text(frm2, height=10, wrap=tk.WORD, state=tk.DISABLED)
         self._history.pack(fill=tk.BOTH, expand=True, pady=(4,0))
 
+        ttk.Label(frm2, text="Kontext (letzte Analyse):").pack(anchor="w", pady=(8,0))
+        self._context = tk.Text(frm2, height=8, wrap=tk.WORD, state=tk.DISABLED)
+        self._context.pack(fill=tk.BOTH, expand=True, pady=(4,0))
+
         try:
             self._root.lift(); self._chat.lift(); self._root.focus_force()
         except Exception:
             pass
+
+        register_context_update_handler(self._update_context)
 
         self._root.protocol("WM_DELETE_WINDOW", lambda: self._root.iconify())
         self._chat.protocol("WM_DELETE_WINDOW", lambda: self._chat.iconify())
@@ -1045,6 +1080,21 @@ class GUI:
         self._history.insert("end", f"[{role}] {msg}\n")
         self._history.configure(state=tk.DISABLED)
         self._history.see("end")
+
+    def _update_context(self, title: str, url: str, text: str):
+        def _apply():
+            header = f"{title}\n{url}\n\n" if url else f"{title}\n\n"
+            body = text.strip() or "[kein sichtbarer Text]"
+            self._context.configure(state=tk.NORMAL)
+            self._context.delete("1.0", "end")
+            self._context.insert("1.0", header + body)
+            self._context.configure(state=tk.DISABLED)
+            self._context.see("1.0")
+
+        try:
+            self._context.after(0, _apply)
+        except Exception:
+            pass
 
     # Callbacks
     def _apply_persona(self):
@@ -1389,6 +1439,11 @@ async def auto_responder_loop(page, planner: LLMPlanner):
                             # Kontext (kleiner Auszug der Seite)
                             snap = await read_page(page)
                             snippet = shorten(snap.get("text", ""), 600)
+                            _notify_context_update(
+                                chat_identity or "Aktueller Kontext",
+                                snap.get("url", ""),
+                                snippet or "",
+                            )
                             reply = await generate_reply(
                                 planner,
                                 snippet,
