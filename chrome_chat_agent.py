@@ -34,8 +34,8 @@ AGENT_VERSION = "1.0.0"
 # -------------------- Konfiguration ------------------------------------------
 ASK_CONFIRM      = False  # keine Rückfragen vor Aktionen
 AUTO_SEND        = True   # nach Tippen automatisch senden (domain-spezifisch)
-FORCE_CHAT_MODE  = True   # nur Chat-Befehle zulassen (keine Navigation)
-LOCK_TO_DOMAIN   = True   # Tab/Domain sperren – kein Wechsel erlaubt
+FORCE_CHAT_MODE  = False  # nur Chat-Befehle zulassen (keine Navigation)
+LOCK_TO_DOMAIN   = False  # Tab/Domain sperren – kein Wechsel erlaubt
 
 # Auto-Responder
 AUTO_MODE             = False   # Startzustand; im GUI umschaltbar
