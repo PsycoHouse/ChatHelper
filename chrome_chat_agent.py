@@ -192,6 +192,26 @@ async def read_page(page) -> dict:
           }
           if (!container) return null;
 
+          const headerSelectors = [
+            "[data-testid='conversation-info-header-chat-title']",
+            "header [data-testid='conversation-panel'] h1 span",
+            "header [data-testid='conversation-panel'] [role='heading'] span",
+            "header h1 span",
+            "header [role='heading'] span",
+            "header span[title]",
+            "header span[dir='auto']"
+          ];
+          let activeName = "";
+          for (const sel of headerSelectors) {
+            const el = document.querySelector(sel);
+            if (el && el.innerText && el.innerText.trim()) {
+              activeName = el.innerText.trim();
+              break;
+            }
+          }
+          const isGroupChat = !!document.querySelector("[data-testid='conversation-info-header-group-participants']");
+          const normalizedActiveName = (isGroupChat ? "" : (activeName || "")).toLowerCase();
+
           const normalize = (txt) => (txt || "").replace(/\s+/g, " ").trim();
           const labelFor = (node) => {
             const cls = ((node.className || "") + " " + ((node.parentElement && node.parentElement.className) || "")).toLowerCase();
@@ -216,6 +236,23 @@ async def read_page(page) -> dict:
               }
             } catch (err) {}
             return "Freund";
+          };
+
+          const extractAuthor = (node) => {
+            const readAttr = (el) => {
+              if (!el || !el.getAttribute) return "";
+              const value = el.getAttribute("data-pre-plain-text") || "";
+              if (value) return value;
+              const nested = el.querySelector ? el.querySelector("[data-pre-plain-text]") : null;
+              if (nested && nested.getAttribute) return nested.getAttribute("data-pre-plain-text") || "";
+              return "";
+            };
+            const raw = readAttr(node);
+            if (!raw) return "";
+            const cleaned = raw.replace(/^\[[^\]]*\]\s*/, "");
+            const idx = cleaned.indexOf(":");
+            const namePart = idx >= 0 ? cleaned.slice(0, idx) : cleaned;
+            return namePart.trim();
           };
 
           const bubbleSelectors = [
@@ -244,7 +281,9 @@ async def read_page(page) -> dict:
               const dedupeKey = key || text;
               if (seen.has(dedupeKey)) continue;
               seen.add(dedupeKey);
-              messages.push({ label: labelFor(node), text });
+              const label = labelFor(node);
+              const author = extractAuthor(node);
+              messages.push({ label, text, author });
             }
           }
 
@@ -255,10 +294,18 @@ async def read_page(page) -> dict:
 
           const compact = [];
           for (const msg of messages) {
+            if ((msg.label || "").toLowerCase() === "ich") continue;
+            if (normalizedActiveName && msg.author) {
+              if (msg.author.toLowerCase() !== normalizedActiveName) continue;
+            }
             const formatted = `${msg.label}: ${msg.text}`;
             if (!compact.length || compact[compact.length - 1] !== formatted) {
               compact.push(formatted);
             }
+          }
+
+          if (!compact.length) {
+            return null;
           }
 
           const lastFour = compact.slice(-4);
@@ -1412,6 +1459,30 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
             "[aria-label='Conversation thread']",
           ];
 
+          const HEADER_SELECTORS = [
+            "[data-testid='conversation-info-header-chat-title']",
+            "header [data-testid='conversation-panel'] h1 span",
+            "header [data-testid='conversation-panel'] [role='heading'] span",
+            "header h1 span",
+            "header [role='heading'] span",
+            "header span[title]",
+            "header span[dir='auto']"
+          ];
+
+          const findActiveName = () => {
+            for (const sel of HEADER_SELECTORS) {
+              const el = document.querySelector(sel);
+              if (el && el.innerText && el.innerText.trim()) {
+                return el.innerText.trim();
+              }
+            }
+            return "";
+          };
+
+          const normalizeName = (value) => (value || "").toLowerCase();
+          const isGroupChat = !!document.querySelector("[data-testid='conversation-info-header-group-participants']");
+          const activeName = isGroupChat ? "" : normalizeName(findActiveName());
+
           const findActiveChat = () => {
             for (const sel of ACTIVE_CHAT_SELECTORS) {
               const node = document.querySelector(sel);
@@ -1528,6 +1599,24 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
             }
           };
 
+          const extractAuthor = (el) => {
+            if (!el) return "";
+            const readAttr = (node) => {
+              if (!node || !node.getAttribute) return "";
+              const value = node.getAttribute("data-pre-plain-text") || "";
+              if (value) return value;
+              const nested = node.querySelector ? node.querySelector("[data-pre-plain-text]") : null;
+              if (nested && nested.getAttribute) return nested.getAttribute("data-pre-plain-text") || "";
+              return "";
+            };
+            const raw = readAttr(el);
+            if (!raw) return "";
+            const cleaned = raw.replace(/^\[[^\]]*\]\s*/, "");
+            const idx = cleaned.indexOf(":");
+            const namePart = idx >= 0 ? cleaned.slice(0, idx) : cleaned;
+            return namePart.trim().toLowerCase();
+          };
+
           const preferredSelectors = [
             "[data-testid='msg-text']",
             ".copyable-text",
@@ -1537,6 +1626,10 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
           for (let i = containers.length - 1; i >= 0; i--) {
             const c = containers[i];
             if (isProbablyOutgoing(c)) continue;
+            if (activeName) {
+              const author = extractAuthor(c);
+              if (author && author !== activeName) continue;
+            }
 
             // Text robust extrahieren
             let text = "";
@@ -1607,6 +1700,30 @@ async def extract_chat_history(page, max_messages: int = 12) -> Optional[str]:
             "[aria-label='Conversation thread']",
           ];
 
+          const HEADER_SELECTORS = [
+            "[data-testid='conversation-info-header-chat-title']",
+            "header [data-testid='conversation-panel'] h1 span",
+            "header [data-testid='conversation-panel'] [role='heading'] span",
+            "header h1 span",
+            "header [role='heading'] span",
+            "header span[title]",
+            "header span[dir='auto']"
+          ];
+
+          const findActiveName = () => {
+            for (const sel of HEADER_SELECTORS) {
+              const el = document.querySelector(sel);
+              if (el && el.innerText && el.innerText.trim()) {
+                return el.innerText.trim();
+              }
+            }
+            return "";
+          };
+
+          const activeNameRaw = findActiveName() || "";
+          const isGroupChat = !!document.querySelector("[data-testid='conversation-info-header-group-participants']");
+          const normalizedActiveName = isGroupChat ? "" : activeNameRaw.toLowerCase();
+
           const isInActiveChat = (el) => {
             return ACTIVE_CHAT_SELECTORS.some(sel => el.closest(sel));
           };
@@ -1616,6 +1733,24 @@ async def extract_chat_history(page, max_messages: int = 12) -> Optional[str]:
 
           const take = containers.slice(-Math.max(1, limit));
           const items = [];
+
+          const extractAuthor = (node) => {
+            if (!node) return "";
+            const readAttr = (el) => {
+              if (!el || !el.getAttribute) return "";
+              const value = el.getAttribute("data-pre-plain-text") || "";
+              if (value) return value;
+              const nested = el.querySelector ? el.querySelector("[data-pre-plain-text]") : null;
+              if (nested && nested.getAttribute) return nested.getAttribute("data-pre-plain-text") || "";
+              return "";
+            };
+            const raw = readAttr(node);
+            if (!raw) return "";
+            const cleaned = raw.replace(/^\[[^\]]*\]\s*/, "");
+            const idx = cleaned.indexOf(":");
+            const namePart = idx >= 0 ? cleaned.slice(0, idx) : cleaned;
+            return namePart.trim().toLowerCase();
+          };
 
           const extractText = (node) => {
             let text = "";
@@ -1634,6 +1769,12 @@ async def extract_chat_history(page, max_messages: int = 12) -> Optional[str]:
             if (isOutgoing) role = "me";
             else if (isIncoming) role = "them";
             if (!role) continue;
+
+            if (role === "me") continue;
+            if (normalizedActiveName) {
+              const author = extractAuthor(c);
+              if (author && author !== normalizedActiveName) continue;
+            }
 
             const text = extractText(c);
             if (!text) continue;
