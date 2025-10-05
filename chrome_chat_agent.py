@@ -1412,8 +1412,51 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
             "[aria-label='Conversation thread']",
           ];
 
+          const findActiveChat = () => {
+            for (const sel of ACTIVE_CHAT_SELECTORS) {
+              const node = document.querySelector(sel);
+              if (node) return node;
+            }
+            return null;
+          };
+
+          const activeChat = findActiveChat();
+
           const isInActiveChat = (el) => {
-            return ACTIVE_CHAT_SELECTORS.some(sel => el.closest(sel));
+            if (!el) return false;
+            if (!activeChat) return true;
+            try {
+              return activeChat.contains(el);
+            } catch (err) {
+              return true;
+            }
+          };
+
+          const guessRole = (el) => {
+            if (!el) return null;
+            const cls = ((el.className || "") + "").toLowerCase();
+            const dataTestId = ((el.getAttribute && el.getAttribute("data-testid")) || "").toLowerCase();
+            if (cls.includes("message-out") || dataTestId.includes("msg-out")) return "out";
+            if (cls.includes("message-in") || dataTestId.includes("msg-in")) return "in";
+            const wrapper = el.closest && el.closest(".message-out, .message-in");
+            if (wrapper && wrapper !== el) return guessRole(wrapper);
+            return null;
+          };
+
+          const isProbablyOutgoing = (el) => {
+            const role = guessRole(el);
+            if (role) return role === "out";
+            if (!activeChat || !el || !el.getBoundingClientRect) return false;
+            try {
+              const rect = el.getBoundingClientRect();
+              const containerRect = activeChat.getBoundingClientRect();
+              if (!rect || !containerRect || !rect.width || !containerRect.width) return false;
+              const center = rect.left + rect.width / 2;
+              const containerCenter = containerRect.left + containerRect.width / 2;
+              return center >= containerCenter;
+            } catch (err) {
+              return false;
+            }
           };
 
           // Alle Message-Container einsammeln (neue & alte DOMs), dabei die Chatliste links ignorieren
@@ -1422,9 +1465,7 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
 
           for (let i = containers.length - 1; i >= 0; i--) {
             const c = containers[i];
-            const isIncoming = c.classList.contains("message-in") || !!c.querySelector("[data-pre-plain-text]");
-            const isOutgoing = c.classList.contains("message-out");
-            if (!isIncoming || isOutgoing) continue;
+            if (isProbablyOutgoing(c)) continue;
 
             // Text robust extrahieren
             let text = "";
