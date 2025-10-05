@@ -192,26 +192,77 @@ async def read_page(page) -> dict:
           }
           if (!container) return null;
 
-          const rows = Array.from(container.querySelectorAll("div[role='row'], li[role='listitem']"));
-          const parts = [];
-          const pushUnique = (txt) => {
-            const cleaned = (txt || "").replace(/\s+/g, " ").trim();
-            if (!cleaned) return;
-            if (!parts.length || parts[parts.length - 1] !== cleaned) {
-              parts.push(cleaned);
+          const normalize = (txt) => (txt || "").replace(/\s+/g, " ").trim();
+          const labelFor = (node) => {
+            const cls = ((node.className || "") + " " + ((node.parentElement && node.parentElement.className) || "")).toLowerCase();
+            if (cls.includes("message-out")) return "Ich";
+            if (cls.includes("message-in")) return "Freund";
+            const wrapper = node.closest(".message-out, .message-in");
+            if (wrapper) {
+              const wCls = (wrapper.className || "").toLowerCase();
+              if (wCls.includes("message-out")) return "Ich";
+              if (wCls.includes("message-in")) return "Freund";
+            }
+            const dataTestid = ((node.getAttribute("data-testid") || "") + "").toLowerCase();
+            if (dataTestid.includes("msg-out")) return "Ich";
+            if (dataTestid.includes("msg-in")) return "Freund";
+            try {
+              const rect = node.getBoundingClientRect();
+              const containerRect = container.getBoundingClientRect();
+              if (rect && containerRect && rect.width && containerRect.width) {
+                const relativeCenter = rect.left + rect.width / 2 - containerRect.left;
+                if (relativeCenter > containerRect.width / 2) return "Ich";
+                return "Freund";
+              }
+            } catch (err) {}
+            return "Freund";
+          };
+
+          const bubbleSelectors = [
+            "div[data-testid='msg-container']",
+            "li[data-testid='msg-container']",
+            "div[class*='message-in']",
+            "div[class*='message-out']"
+          ];
+          const seen = new Set();
+          const messages = [];
+          const isHTMLElement = (value) => {
+            try {
+              return value instanceof HTMLElement;
+            } catch (err) {
+              return !!(value && typeof value === 'object' && 'innerText' in value);
             }
           };
 
-          if (!rows.length) {
-            pushUnique(container.innerText || container.textContent || "");
-            return parts.join("\n") || null;
+          for (const sel of bubbleSelectors) {
+            const nodes = Array.from(container.querySelectorAll(sel));
+            for (const node of nodes) {
+              if (!isHTMLElement(node)) continue;
+              const text = normalize(node.innerText || node.textContent || "");
+              if (!text) continue;
+              const key = text + "::" + (node.dataset ? node.dataset.id || "" : "");
+              const dedupeKey = key || text;
+              if (seen.has(dedupeKey)) continue;
+              seen.add(dedupeKey);
+              messages.push({ label: labelFor(node), text });
+            }
           }
 
-          for (const row of rows) {
-            pushUnique(row.innerText || row.textContent || "");
+          if (!messages.length) {
+            const fallback = normalize(container.innerText || container.textContent || "");
+            return fallback || null;
           }
 
-          return parts.join("\n") || null;
+          const compact = [];
+          for (const msg of messages) {
+            const formatted = `${msg.label}: ${msg.text}`;
+            if (!compact.length || compact[compact.length - 1] !== formatted) {
+              compact.push(formatted);
+            }
+          }
+
+          const lastFour = compact.slice(-4);
+          return lastFour.join("\n") || null;
         })()
         """
         try:
