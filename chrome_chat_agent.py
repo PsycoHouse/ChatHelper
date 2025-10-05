@@ -1001,16 +1001,11 @@ async def generate_reply(
     chat_identity: Optional[str] = None,
 ) -> str:
     if not planner.enabled:
-        base = "Alles klar!"
-        if last_msg:
-            base = f"Klingt gut! {last_msg[:60]}"
+        reply = _friendly_stub_reply(last_msg, history_snippet, chat_identity)
         extra = instruction.strip()
-        label = (chat_identity or "").strip()
-        if label:
-            base = f"[{label}] {base}"
         if extra:
-            return f"{base} ({extra})"
-        return base
+            reply = f"{reply} ({extra})"
+        return reply
     try:
         persona = get_ai_character()
         chat_label = (chat_identity or "").strip()
@@ -1038,6 +1033,45 @@ async def generate_reply(
     except Exception as e:
         console.print(f"[yellow]KI-Fehler (Auto-Reply) → Fallback:[/yellow] {e}")
         return "Alles klar! 🙂"
+
+
+def _friendly_stub_reply(last_msg: str, history_snippet: str, chat_identity: Optional[str]) -> str:
+    """Erzeugt eine menschlichere Antwort, falls kein LLM verfügbar ist."""
+
+    name = (chat_identity or "").strip()
+    mention = f", {name}" if name else ""
+
+    msg = (last_msg or "").strip()
+    msg_low = msg.lower()
+
+    def shorten_text(text: str, limit: int = 80) -> str:
+        text = text.strip()
+        return text if len(text) <= limit else text[: limit - 1] + "…"
+
+    if not msg:
+        return f"Alles klar{mention}! Sag einfach Bescheid, wenn du was brauchst."
+
+    if any(word in msg_low for word in ("danke", "thx", "merci")):
+        return f"Sehr gern{mention}! Freut mich, wenn ich helfen konnte."
+
+    if any(word in msg_low for word in ("ok", "okay", "okey", "passt", "mach ich", "alles klar")):
+        return f"Perfekt{mention}! Dann machen wir das genau so."
+
+    if "?" in msg:
+        return f"Gute Frage{mention}! Ich kümmere mich gleich darum und melde mich."
+
+    if any(word in msg_low for word in ("sorry", "entschuld", "vergiss")):
+        return f"Alles gut{mention}, kein Stress. Lass es mich wissen, wenn ich unterstützen kann."
+
+    history = (history_snippet or "").strip()
+    if history:
+        history_hint = shorten_text(history)
+        return (
+            f"Verstanden{mention}! Danke für dein Update: \"{shorten_text(msg)}\". "
+            f"Ich hab den Verlauf im Blick ({history_hint})."
+        )
+
+    return f"Verstanden{mention}! Danke für deine Rückmeldung: \"{shorten_text(msg)}\"."
 
 
 async def compose_chat_reply(page, planner: "LLMPlanner", instruction: str) -> Optional[str]:
