@@ -206,6 +206,7 @@ async def _find_dom_input(page):
         if (el.tagName === 'TEXTAREA') s += 30;
         const attrs = (
           (el.getAttribute('placeholder')||'') + ' ' +
+          (el.getAttribute('data-placeholder')||'') + ' ' +
           (el.getAttribute('aria-label')||'') + ' ' +
           (el.getAttribute('role')||'')
         ).toLowerCase();
@@ -213,8 +214,12 @@ async def _find_dom_input(page):
         if (searchWords.some(k => attrs.includes(k))) s -= 120;
         const type = (el.getAttribute('type')||'').toLowerCase();
         if (type === 'search') s -= 120;
+        const dataTab = (el.getAttribute('data-tab')||'').toLowerCase();
+        if (dataTab === '3') s -= 200; // WhatsApp Suchfeld
+        if (['6','7','9','10','11'].includes(dataTab)) s += 50; // WhatsApp Composer-Bereich
         // Ausschlüsse: Header/Search-Bereiche
         if (el.closest('header, [role="search"], [data-testid*="search" i], [aria-label*="such" i], [aria-label*="search" i]')) s -= 150;
+        if (el.closest('[data-testid="chat-list-search"]')) s -= 200;
         // Bonus: im Footer/Composer-Bereich
         if (el.closest('footer')) s += 30;
         // Bonus: Send-Button in der Nähe
