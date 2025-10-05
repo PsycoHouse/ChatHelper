@@ -304,6 +304,43 @@ async def cmd_tippe(page, selector: str, text: str):
             console.print("[red]Kein passendes Eingabefeld gefunden (Auto-Suche).[/red]")
             return
 
+    async def _current_text() -> str:
+        try:
+            return await loc.evaluate(
+                """
+                (el) => {
+                  const readValue = (target) => {
+                    if (!target) return '';
+                    if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') {
+                      return target.value || '';
+                    }
+                    if (target.isContentEditable) {
+                      return target.innerText || '';
+                    }
+                    return target.textContent || '';
+                  };
+                  const direct = readValue(el);
+                  if (direct) return direct;
+                  const nested = el.querySelector('[contenteditable="true"], textarea, input');
+                  return readValue(nested);
+                }
+                """
+            )
+        except Exception:
+            return ""
+
+    def _normalize(txt: str) -> str:
+        return " ".join((txt or "").replace("\xa0", " ").split())
+
+    async def _has_typed_text(expected: str) -> bool:
+        normalized_expected = _normalize(expected)
+        if not normalized_expected:
+            return True
+        current = _normalize(await _current_text())
+        if not current:
+            return False
+        return normalized_expected in current or current.endswith(normalized_expected)
+
     try:
         await loc.scroll_into_view_if_needed()
     except Exception:
@@ -317,11 +354,79 @@ async def cmd_tippe(page, selector: str, text: str):
         await loc.fill("")
     except Exception:
         pass
+    try:
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+    except Exception:
+        pass
 
-    await loc.type(text, delay=15)
+    last_error: Optional[Exception] = None
+    typed_ok = False
+
+    # 1) Regulär tippen
+    try:
+        await loc.type(text, delay=15)
+        typed_ok = await _has_typed_text(text)
+    except Exception as e:
+        last_error = e
+        typed_ok = False
+
+    # 2) Fallback: insert_text über Keyboard (z.B. für contenteditable Lexical)
+    if not typed_ok:
+        try:
+            await page.keyboard.insert_text(text)
+            typed_ok = await _has_typed_text(text)
+        except Exception as e:
+            last_error = e
+            typed_ok = False
+
+    # 3) Fallback: direkte DOM-Manipulation mit Events
+    if not typed_ok:
+        try:
+            await loc.evaluate(
+                """
+                (el, value) => {
+                  const apply = (target) => {
+                    if (!target) return false;
+                    if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') {
+                      target.value = value;
+                      target.dispatchEvent(new Event('input', {bubbles: true}));
+                      target.dispatchEvent(new Event('change', {bubbles: true}));
+                      return true;
+                    }
+                    if (target.isContentEditable) {
+                      target.focus();
+                      target.innerHTML = '';
+                      const textNode = document.createTextNode(value);
+                      target.appendChild(textNode);
+                      target.dispatchEvent(new InputEvent('input', {data: value, bubbles: true}));
+                      target.dispatchEvent(new Event('change', {bubbles: true}));
+                      return true;
+                    }
+                    return false;
+                  };
+                  if (apply(el)) return;
+                  const nested = el.querySelector('[contenteditable="true"], textarea, input');
+                  if (nested) apply(nested);
+                }
+                """,
+                text,
+            )
+            typed_ok = await _has_typed_text(text)
+        except Exception as e:
+            last_error = e
+            typed_ok = False
+
+    if not typed_ok:
+        err_msg = "[red]Konnte Text nicht in das Eingabefeld eintragen.[/red]"
+        if last_error:
+            err_msg += f" [dim]({last_error})[/dim]"
+        console.print(err_msg)
+        return
+
     console.print("[green]Text geschrieben.[/green]")
     await _maybe_auto_send(page)
-    
+
     # Nach Senden: eigenen letzten Text merken (Echo-Schutz)
     global _last_sent_text, _last_sent_time
     _last_sent_text = text.strip()
