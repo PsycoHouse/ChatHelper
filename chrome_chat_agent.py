@@ -238,6 +238,50 @@ async def _find_dom_input(page):
     Markiert das beste Feld mit data-__agent="1" und liefert den Locator.
     Vermeidet Suchleisten, bevorzugt contenteditable/Textareas unten auf der Seite.
     """
+
+    async def _mark_locator(loc):
+        try:
+            handle = await loc.element_handle()
+        except Exception:
+            handle = None
+        if not handle:
+            return None
+        try:
+            await page.evaluate(
+                """
+                (el) => {
+                  document.querySelectorAll('[data-__agent]').forEach(e => e.removeAttribute('data-__agent'));
+                  el.setAttribute('data-__agent', '1');
+                }
+                """,
+                handle,
+            )
+        finally:
+            try:
+                await handle.dispose()
+            except Exception:
+                pass
+        try:
+            return page.locator("[data-__agent='1']").first
+        except Exception:
+            return loc
+
+    host = (urlparse(page.url).hostname or "").lower()
+
+    # Spezieller Pfad für WhatsApp: der eigentliche Composer sitzt mittig im Layout.
+    if "web.whatsapp.com" in host:
+        wa_locator = page.locator("[data-testid='conversation-compose-box-input'] [contenteditable='true']").first
+        if await wa_locator.count():
+            marked = await _mark_locator(wa_locator)
+            if marked:
+                return marked
+        # Fallback: bekannte data-tab Werte des Composer-Bereichs
+        wa_locator = page.locator("div[contenteditable='true'][data-tab='10']").first
+        if await wa_locator.count():
+            marked = await _mark_locator(wa_locator)
+            if marked:
+                return marked
+
     js = r"""
     (() => {
       const isVisible = (el) => {
