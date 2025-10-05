@@ -73,6 +73,7 @@ _last_sent_time: float = 0.0
 _ECHO_COOLDOWN_SEC = 10.0  # innerhalb dieses Fensters niemals auf eigenen Text antworten
 
 AUTO_REPLY_TOKEN = "__AUTO_REPLY__"
+AUTO_REPLY_DRAFT_TOKEN = "__AUTO_REPLY_DRAFT__"
 
 # -------------------- Transparenz-Hinweis ------------------------------------
 console.print(f"[bold green]ChatHelper CMD Version {AGENT_VERSION}[/bold green]")
@@ -833,9 +834,9 @@ class GUI:
         self._entry.pack(fill=tk.BOTH, expand=True, pady=(4,6))
 
         btns2 = ttk.Frame(frm2); btns2.pack(fill=tk.X)
-        ttk.Button(btns2, text="Senden (Enter)", command=self._send_from_gui).pack(side=tk.LEFT)
-        ttk.Button(btns2, text="lese",  command=lambda: self.msg_queue.put("lese")).pack(side=tk.LEFT, padx=(8,0))
+        ttk.Button(btns2, text="lese",  command=lambda: self.msg_queue.put("lese")).pack(side=tk.LEFT)
         ttk.Button(btns2, text="hilfe", command=lambda: self.msg_queue.put("hilfe")).pack(side=tk.LEFT, padx=(8,0))
+        ttk.Button(btns2, text="AI Entwurf", command=self._request_ai_draft).pack(side=tk.LEFT, padx=(8,0))
         ttk.Button(btns2, text="AI antwortet", command=self._request_ai_reply).pack(side=tk.LEFT, padx=(8,0))
         self._entry.bind("<Return>", self._on_enter)
 
@@ -891,6 +892,24 @@ class GUI:
         self._log_history("System", "AI-Antwort ausgelöst")
         self.msg_queue.put(AUTO_REPLY_TOKEN)
 
+    def _request_ai_draft(self):
+        self._log_history("System", "AI-Entwurf angefordert")
+        self.msg_queue.put(AUTO_REPLY_DRAFT_TOKEN)
+
+    def _set_entry_text(self, text: str):
+        def _update():
+            self._entry.delete("1.0", "end")
+            self._entry.insert("1.0", text)
+            try:
+                self._entry.focus_set()
+            except Exception:
+                pass
+
+        try:
+            self._entry.after(0, _update)
+        except Exception:
+            pass
+
 # --------------------- REPL (aus GUI-Queue) ----------------------------------
 HELP = """Befehle (Beispiele):
   lese                        -> Seitentitel/URL + Textauszug anzeigen
@@ -934,6 +953,14 @@ async def gui_repl(page, gui: GUI):
                 page = await cmd_tippe(page, "", reply_text)
             else:
                 console.print("[yellow]Keine eingehende Nachricht gefunden, auf die geantwortet werden kann.[/yellow]")
+            continue
+        if raw == AUTO_REPLY_DRAFT_TOKEN:
+            reply_text = await compose_chat_reply(page, planner, "")
+            if reply_text:
+                gui._log_history("KI", f"Entwurf: {reply_text}")
+                gui._set_entry_text(reply_text)
+            else:
+                console.print("[yellow]Keine eingehende Nachricht gefunden, für die ein Entwurf erstellt werden kann.[/yellow]")
             continue
         low = raw.lower()
         if low in ("ende", "quit", "exit"):
