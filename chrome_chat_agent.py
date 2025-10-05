@@ -174,6 +174,53 @@ async def read_page(page) -> dict:
         body_text = await page.evaluate("() => document.body?.innerText || ''")
     except Exception:
         pass
+
+    host = (urlparse(url).hostname or "").lower()
+    if "web.whatsapp.com" in host:
+        wa_js = r"""
+        (() => {
+          const selectors = [
+            "[data-testid='conversation-panel-messages']",
+            "[data-testid='conversation-panel-wrapper']",
+            "div[data-tab='8']",
+            "[role='grid']"
+          ];
+          let container = null;
+          for (const sel of selectors) {
+            const candidate = document.querySelector(sel);
+            if (candidate) { container = candidate; break; }
+          }
+          if (!container) return null;
+
+          const rows = Array.from(container.querySelectorAll("div[role='row'], li[role='listitem']"));
+          const parts = [];
+          const pushUnique = (txt) => {
+            const cleaned = (txt || "").replace(/\s+/g, " ").trim();
+            if (!cleaned) return;
+            if (!parts.length || parts[parts.length - 1] !== cleaned) {
+              parts.push(cleaned);
+            }
+          };
+
+          if (!rows.length) {
+            pushUnique(container.innerText || container.textContent || "");
+            return parts.join("\n") || null;
+          }
+
+          for (const row of rows) {
+            pushUnique(row.innerText || row.textContent || "");
+          }
+
+          return parts.join("\n") || null;
+        })()
+        """
+        try:
+            convo_text = await page.evaluate(wa_js)
+        except Exception:
+            convo_text = None
+        if isinstance(convo_text, str) and convo_text.strip():
+            body_text = f"{convo_text.strip()}\n\n{body_text}" if body_text else convo_text.strip()
+
     return {"url": url, "title": title, "text": body_text}
 
 async def safe_confirm(prompt: str) -> bool:
