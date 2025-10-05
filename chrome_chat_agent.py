@@ -70,6 +70,7 @@ _LOCK_HOST  = ""  # wird in connect_chrome gesetzt
 
 _last_sent_text: str = ""
 _last_sent_time: float = 0.0
+_last_sent_per_chat: dict[str, tuple[str, float]] = {}
 _ECHO_COOLDOWN_SEC = 10.0  # innerhalb dieses Fensters niemals auf eigenen Text antworten
 
 AUTO_REPLY_TOKEN = "__AUTO_REPLY__"
@@ -228,6 +229,64 @@ def _hostname(url: str) -> str:
         return (urlparse(url).hostname or "").lower()
     except Exception:
         return ""
+
+
+def _chat_storage_key(host: str, identity: Optional[str]) -> Optional[str]:
+    host = (host or "").strip().lower()
+    identity = (identity or "").strip()
+    if not host:
+        return None
+    if identity:
+        return f"{host}::{identity}"
+    return host
+
+
+async def get_active_chat_identity(page) -> Optional[str]:
+    try:
+        host = (urlparse(page.url).hostname or "").lower()
+    except Exception:
+        host = ""
+
+    if "web.whatsapp.com" in host:
+        js = r"""
+        (() => {
+          const headerSelectors = [
+            "[data-testid='conversation-info-header']",
+            "[data-testid='conversation-header']",
+            "header [data-testid='conversation-panel']"
+          ];
+          let header = null;
+          for (const sel of headerSelectors) {
+            const candidate = document.querySelector(sel);
+            if (candidate) { header = candidate; break; }
+          }
+          if (!header) return null;
+          const nameSelectors = [
+            "[data-testid='conversation-info-header-chat-title']",
+            "h1[role='heading'] span",
+            "div[role='heading'] span",
+            "span[title]",
+            "span[dir='auto']"
+          ];
+          for (const sel of nameSelectors) {
+            const el = header.querySelector(sel);
+            if (el) {
+              const txt = (el.innerText || el.textContent || "").trim();
+              if (txt) return txt;
+            }
+          }
+          const fallback = (header.innerText || "").trim();
+          return fallback || null;
+        })()
+        """
+        try:
+            name = await page.evaluate(js)
+        except Exception:
+            name = None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+
+    return None
 
 
 async def cmd_lese(page):
@@ -673,9 +732,18 @@ async def cmd_tippe(page, selector: str, text: str):
     await _maybe_auto_send(page)
 
     # Nach Senden: eigenen letzten Text merken (Echo-Schutz)
-    global _last_sent_text, _last_sent_time
+    global _last_sent_text, _last_sent_time, _last_sent_per_chat
     _last_sent_text = text.strip()
     _last_sent_time = time.time()
+
+    try:
+        host = (urlparse(page.url).hostname or "").lower()
+    except Exception:
+        host = ""
+    chat_identity = await get_active_chat_identity(page) if host in CHAT_DOMAINS else None
+    key = _chat_storage_key(host, chat_identity)
+    if key:
+        _last_sent_per_chat[key] = (_last_sent_text, _last_sent_time)
     return page
 
 
@@ -811,23 +879,28 @@ async def generate_reply(
     history_snippet: str,
     last_msg: str,
     instruction: str = "",
+    chat_identity: Optional[str] = None,
 ) -> str:
     if not planner.enabled:
         base = "Alles klar!"
         if last_msg:
             base = f"Klingt gut! {last_msg[:60]}"
         extra = instruction.strip()
+        label = (chat_identity or "").strip()
+        if label:
+            base = f"[{label}] {base}"
         if extra:
             return f"{base} ({extra})"
         return base
     try:
         persona = get_ai_character()
+        chat_label = (chat_identity or "").strip()
         msgs = [
             {
                 "role": "system",
                 "content": (
                     "Du antwortest kurz, freundlich und kontextbezogen. "
-                    f"Persona: {persona}"
+                    f"Persona: {persona}" + (f" Du schreibst gerade mit '{chat_label}'." if chat_label else "")
                 ),
             },
             {"role": "user", "content": f"Kontext (Auszug): {history_snippet}"},
@@ -858,6 +931,7 @@ async def compose_chat_reply(page, planner: "LLMPlanner", instruction: str) -> O
     if host not in CHAT_DOMAINS:
         return None
 
+    chat_identity = await get_active_chat_identity(page) if host in CHAT_DOMAINS else None
     latest = await extract_latest_incoming_message(page)
     history = await extract_chat_history(page, max_messages=12)
 
@@ -866,10 +940,19 @@ async def compose_chat_reply(page, planner: "LLMPlanner", instruction: str) -> O
         snap = await read_page(page)
         snippet_source = shorten(snap.get("text", ""), 600)
 
+    if snippet_source and chat_identity:
+        snippet_source = f"Chat mit {chat_identity}:\n{snippet_source}"
+
     if not latest and not snippet_source:
         return None
 
-    reply = await generate_reply(planner, snippet_source, latest or "", instruction)
+    reply = await generate_reply(
+        planner,
+        snippet_source,
+        latest or "",
+        instruction,
+        chat_identity=chat_identity,
+    )
     if reply:
         return reply.strip()
     return None
@@ -1282,16 +1365,22 @@ async def auto_responder_loop(page, planner: LLMPlanner):
                 page = await _ensure_active_page(page)
                 host = (urlparse(page.url).hostname or "").lower()
                 if AUTO_DOMAINS.get(host, False):
+                    chat_identity = await get_active_chat_identity(page)
+                    chat_key = _chat_storage_key(host, chat_identity)
+                    if not chat_key:
+                        await asyncio.sleep(AUTO_POLL_SECONDS)
+                        continue
+
                     latest = await extract_latest_incoming_message(page)
                     if latest:
-                        key = f"{host}"
-                        if _last_seen_messages.get(key) != latest:
+                        if _last_seen_messages.get(chat_key) != latest:
                             # Echo-Schutz: Reagiere nicht auf eigenen Text im Cooldown-Fenster
                             now = time.time()
+                            last_sent_text, last_sent_time = _last_sent_per_chat.get(chat_key, ("", 0.0))
                             if (
-                                _last_sent_text
-                                and latest.strip() == _last_sent_text.strip()
-                                and (now - _last_sent_time) < _ECHO_COOLDOWN_SEC
+                                last_sent_text
+                                and latest.strip() == last_sent_text.strip()
+                                and (now - last_sent_time) < _ECHO_COOLDOWN_SEC
                             ):
                                 # überspringen – das war sehr wahrscheinlich unsere eigene Nachricht
                                 await asyncio.sleep(AUTO_POLL_SECONDS)
@@ -1300,13 +1389,19 @@ async def auto_responder_loop(page, planner: LLMPlanner):
                             # Kontext (kleiner Auszug der Seite)
                             snap = await read_page(page)
                             snippet = shorten(snap.get("text", ""), 600)
-                            reply = await generate_reply(planner, snippet, latest, "")
+                            reply = await generate_reply(
+                                planner,
+                                snippet,
+                                latest,
+                                "",
+                                chat_identity=chat_identity,
+                            )
 
                             # kleine natürliche Verzögerung
                             await asyncio.sleep(random.uniform(AUTO_MIN_REPLY_DELAY, AUTO_MAX_REPLY_DELAY))
 
                             page = await cmd_tippe(page, "", reply)
-                            _last_seen_messages[key] = latest
+                            _last_seen_messages[chat_key] = latest
 
             await asyncio.sleep(AUTO_POLL_SECONDS)
 
