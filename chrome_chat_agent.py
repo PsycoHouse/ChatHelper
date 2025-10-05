@@ -47,6 +47,10 @@ AUTO_DOMAINS          = {
 _DEBUG_PORT = 9222
 _LOCK_HOST  = ""  # wird in connect_chrome gesetzt
 
+_last_sent_text: str = ""
+_last_sent_time: float = 0.0
+_ECHO_COOLDOWN_SEC = 10.0  # innerhalb dieses Fensters niemals auf eigenen Text antworten
+
 # -------------------- Transparenz-Hinweis ------------------------------------
 console.print("[bold red]⚠ Achtung:[/bold red] Diese Sitzung wird von einer [bold]AI[/bold] unterstützt.")
 console.print("Alle Aktionen im Chrome-Browser laufen über dieses Agent-Skript. Bitte bestätige riskante Schritte bewusst.\n")
@@ -271,10 +275,6 @@ async def _maybe_auto_send(page):
             return
         except Exception:
             console.print("[yellow]Konnte Senden nicht automatisch auslösen.[/yellow]")
-
-        _last_sent_text: str = ""
-        _last_sent_time: float = 0.0
-        _ECHO_COOLDOWN_SEC = 10.0  # innerhalb dieses Fensters niemals auf eigenen Text antworten
 
 
 # --- Tippen -------------------------------------------------------------------
