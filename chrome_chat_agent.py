@@ -72,6 +72,8 @@ _last_sent_text: str = ""
 _last_sent_time: float = 0.0
 _ECHO_COOLDOWN_SEC = 10.0  # innerhalb dieses Fensters niemals auf eigenen Text antworten
 
+AUTO_REPLY_TOKEN = "__AUTO_REPLY__"
+
 # -------------------- Transparenz-Hinweis ------------------------------------
 console.print(f"[bold green]ChatHelper CMD Version {AGENT_VERSION}[/bold green]")
 console.print("[bold red]⚠ Achtung:[/bold red] Diese Sitzung wird von einer [bold]AI[/bold] unterstützt.")
@@ -706,17 +708,36 @@ def _should_reuse_existing_page(current_host: str, target_host: str, prompt: str
 
 
 # Antwort-LLM für Auto-Responder
-async def generate_reply(planner: "LLMPlanner", history_snippet: str, last_msg: str) -> str:
+async def generate_reply(
+    planner: "LLMPlanner",
+    history_snippet: str,
+    last_msg: str,
+    instruction: str = "",
+) -> str:
     if not planner.enabled:
-        return f"Klingt gut! {last_msg[:60]}"
+        base = "Alles klar!"
+        if last_msg:
+            base = f"Klingt gut! {last_msg[:60]}"
+        extra = instruction.strip()
+        if extra:
+            return f"{base} ({extra})"
+        return base
     try:
         persona = get_ai_character()
         msgs = [
-            {"role": "system", "content": f"Du antwortest kurz, freundlich und kontextbezogen. Persona: {persona}"},
+            {
+                "role": "system",
+                "content": (
+                    "Du antwortest kurz, freundlich und kontextbezogen. "
+                    f"Persona: {persona}"
+                ),
+            },
             {"role": "user", "content": f"Kontext (Auszug): {history_snippet}"},
             {"role": "user", "content": f"Letzte Nachricht der Gegenseite: {last_msg}"},
-            {"role": "user", "content": "Formuliere eine kurze, natürliche Antwort (1–2 Sätze)."},
         ]
+        if instruction.strip():
+            msgs.append({"role": "user", "content": f"Zusätzliche Anweisung: {instruction}"})
+        msgs.append({"role": "user", "content": "Formuliere eine kurze, natürliche Antwort (1–2 Sätze)."})
         resp = planner.client.chat.completions.create(
             model=planner.model,
             messages=msgs,
@@ -727,6 +748,29 @@ async def generate_reply(planner: "LLMPlanner", history_snippet: str, last_msg: 
     except Exception as e:
         console.print(f"[yellow]KI-Fehler (Auto-Reply) → Fallback:[/yellow] {e}")
         return "Alles klar! 🙂"
+
+
+async def compose_chat_reply(page, planner: "LLMPlanner", instruction: str) -> Optional[str]:
+    page = await _ensure_active_page(page)
+    try:
+        host = (urlparse(page.url).hostname or "").lower()
+    except Exception:
+        host = ""
+
+    if host not in CHAT_DOMAINS:
+        return None
+
+    latest = await extract_latest_incoming_message(page)
+    snap = await read_page(page)
+    snippet = shorten(snap.get("text", ""), 600)
+
+    if not latest and not snippet:
+        return None
+
+    reply = await generate_reply(planner, snippet, latest or "", instruction)
+    if reply:
+        return reply.strip()
+    return None
 
 # --------------------- Persona + GUI -----------------------------------------
 from threading import RLock
@@ -792,6 +836,7 @@ class GUI:
         ttk.Button(btns2, text="Senden (Enter)", command=self._send_from_gui).pack(side=tk.LEFT)
         ttk.Button(btns2, text="lese",  command=lambda: self.msg_queue.put("lese")).pack(side=tk.LEFT, padx=(8,0))
         ttk.Button(btns2, text="hilfe", command=lambda: self.msg_queue.put("hilfe")).pack(side=tk.LEFT, padx=(8,0))
+        ttk.Button(btns2, text="AI antwortet", command=self._request_ai_reply).pack(side=tk.LEFT, padx=(8,0))
         self._entry.bind("<Return>", self._on_enter)
 
         # History
@@ -842,6 +887,10 @@ class GUI:
             self.msg_queue.put(text)
             self._entry.delete("1.0", "end")
 
+    def _request_ai_reply(self):
+        self._log_history("System", "AI-Antwort ausgelöst")
+        self.msg_queue.put(AUTO_REPLY_TOKEN)
+
 # --------------------- REPL (aus GUI-Queue) ----------------------------------
 HELP = """Befehle (Beispiele):
   lese                        -> Seitentitel/URL + Textauszug anzeigen
@@ -878,6 +927,14 @@ async def gui_repl(page, gui: GUI):
         raw = msg.strip()
         if not raw:
             continue
+        if raw == AUTO_REPLY_TOKEN:
+            reply_text = await compose_chat_reply(page, planner, "")
+            if reply_text:
+                gui._log_history("KI", reply_text)
+                page = await cmd_tippe(page, "", reply_text)
+            else:
+                console.print("[yellow]Keine eingehende Nachricht gefunden, auf die geantwortet werden kann.[/yellow]")
+            continue
         low = raw.lower()
         if low in ("ende", "quit", "exit"):
             break
@@ -887,6 +944,12 @@ async def gui_repl(page, gui: GUI):
 
         # Natürliche Sprache → KI/Stub (liefert genau einen Befehl)
         if raw.split(" ", 1)[0] not in ("lese", "gehe", "klicke", "tippe", "scrolle", "auswahl"):
+            reply_text = await compose_chat_reply(page, planner, raw)
+            if reply_text:
+                gui._log_history("KI", reply_text)
+                page = await cmd_tippe(page, "", reply_text)
+                continue
+
             page = await _ensure_active_page(page)
             page_state = await read_page(page)
             context = json.dumps({"url": page_state["url"], "title": page_state["title"]}, ensure_ascii=False)
@@ -1024,7 +1087,7 @@ async def auto_responder_loop(page, planner: LLMPlanner):
                             # Kontext (kleiner Auszug der Seite)
                             snap = await read_page(page)
                             snippet = shorten(snap.get("text", ""), 600)
-                            reply = await generate_reply(planner, snippet, latest)
+                            reply = await generate_reply(planner, snippet, latest, "")
 
                             # kleine natürliche Verzögerung
                             await asyncio.sleep(random.uniform(AUTO_MIN_REPLY_DELAY, AUTO_MAX_REPLY_DELAY))
