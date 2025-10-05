@@ -269,9 +269,11 @@ async def _find_dom_input(page):
     """Generischer Finder für Chat-Eingabefelder.
     Markiert das beste Feld mit data-__agent="1" und liefert den Locator.
     Vermeidet Suchleisten, bevorzugt contenteditable/Textareas unten auf der Seite.
+    Untersucht zusätzlich iframes/Shadow-DOMs, um Chat-Composer auf verschiedenen
+    Plattformen robuster zu erkennen.
     """
 
-    async def _mark_locator(loc):
+    async def _mark_locator(frame, loc):
         try:
             handle = await loc.element_handle()
         except Exception:
@@ -279,106 +281,201 @@ async def _find_dom_input(page):
         if not handle:
             return None
         try:
-            await page.evaluate(
+            await frame.evaluate(
                 """
                 (el) => {
-                  document.querySelectorAll('[data-__agent]').forEach(e => e.removeAttribute('data-__agent'));
+                  try {
+                    document.querySelectorAll('[data-__agent]')
+                      .forEach(e => e.removeAttribute('data-__agent'));
+                  } catch (err) {}
                   el.setAttribute('data-__agent', '1');
                 }
                 """,
                 handle,
             )
+        except Exception:
+            return loc
         finally:
             try:
                 await handle.dispose()
             except Exception:
                 pass
         try:
-            return page.locator("[data-__agent='1']").first
+            return frame.locator("[data-__agent='1']").first
         except Exception:
             return loc
 
+    async def _try_frame(frame, host_hint: str):
+        try:
+            frame_host = (urlparse(frame.url).hostname or host_hint).lower()
+        except Exception:
+            frame_host = host_hint
+
+        # Spezieller Pfad für WhatsApp: der eigentliche Composer sitzt mittig im Layout.
+        if "web.whatsapp.com" in frame_host:
+            wa_locator = frame.locator(
+                "[data-testid='conversation-compose-box-input'] [contenteditable='true']"
+            ).first
+            if await wa_locator.count():
+                marked = await _mark_locator(frame, wa_locator)
+                if marked:
+                    return marked
+            # Fallback: bekannte data-tab Werte des Composer-Bereichs
+            wa_locator = frame.locator("div[contenteditable='true'][data-tab='10']").first
+            if await wa_locator.count():
+                marked = await _mark_locator(frame, wa_locator)
+                if marked:
+                    return marked
+
+        js = r"""
+        (() => {
+          const clearMarks = (root) => {
+            try {
+              root.querySelectorAll('[data-__agent]').forEach(el => el.removeAttribute('data-__agent'));
+            } catch (err) {}
+          };
+          const selectors = "textarea, input[type='text']:not([type='search']), input:not([type])," +
+                             " [contenteditable='true'], [role='textbox']";
+          const collectCandidates = (root, acc, seen) => {
+            if (!root || seen.has(root)) return;
+            seen.add(root);
+            let elements = [];
+            try {
+              elements = Array.from(root.querySelectorAll(selectors));
+            } catch (err) {}
+            for (const el of elements) {
+              if (!acc.includes(el)) acc.push(el);
+            }
+            let walker;
+            try {
+              walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+            } catch (err) {
+              walker = null;
+            }
+            if (!walker) return;
+            let current = walker.nextNode();
+            while (current) {
+              if (current.shadowRoot) {
+                collectCandidates(current.shadowRoot, acc, seen);
+              }
+              current = walker.nextNode();
+            }
+          };
+
+          const isVisible = (el) => {
+            const r = el.getBoundingClientRect();
+            const st = getComputedStyle(el);
+            return r.width > 20 && r.height > 16 &&
+                   st.visibility !== 'hidden' && st.display !== 'none';
+          };
+          const keywords = [
+            'message','nachricht','reply','antwort','write a message','type a message',
+            'gib eine nachricht ein','messaggio','mensaje','mensagem','メッセージ','сообщение'
+          ];
+          const searchWords = ['search','suche','suchen','buscar','recherche','поиск','pesquisa'];
+
+          const candidates = [];
+          collectCandidates(document, candidates, new Set());
+
+          const scoreEl = (el) => {
+            if (!isVisible(el)) return -1;
+            let s = 0;
+            const rect = el.getBoundingClientRect();
+            const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+            const distBottom = Math.abs(vh - rect.bottom);
+            // näher am unteren Rand → besser
+            s += Math.max(0, 120 - Math.min(120, distBottom));
+            if (el.isContentEditable) s += 50;
+            const tag = el.tagName;
+            if (tag === 'TEXTAREA') s += 40;
+            if (tag === 'DIV') s += 10;
+            const attrs = (
+              (el.getAttribute('placeholder')||'') + ' ' +
+              (el.getAttribute('data-placeholder')||'') + ' ' +
+              (el.getAttribute('aria-label')||'') + ' ' +
+              (el.getAttribute('role')||'') + ' ' +
+              (el.getAttribute('id')||'') + ' ' +
+              (el.getAttribute('name')||'')
+            ).toLowerCase();
+            if (keywords.some(k => attrs.includes(k))) s += 70;
+            if (searchWords.some(k => attrs.includes(k))) s -= 140;
+            const type = (el.getAttribute('type')||'').toLowerCase();
+            if (type === 'search') s -= 140;
+            if (type === 'email' || type === 'password') s -= 60;
+            const dataTab = (el.getAttribute('data-tab')||'').toLowerCase();
+            if (dataTab === '3') s -= 220; // WhatsApp Suchfeld
+            if (['6','7','9','10','11'].includes(dataTab)) s += 60; // WhatsApp Composer-Bereich
+            if (el.closest('header, [role="search"], [data-testid*="search" i], [aria-label*="such" i], [aria-label*="search" i]')) s -= 160;
+            if (el.closest('[data-testid="chat-list-search"]')) s -= 220;
+            if (el.closest('aside')) s -= 30;
+            if (el.closest('footer, [data-testid*="composer" i], [data-testid*="footer" i]')) s += 35;
+            const container = el.closest('form, footer, section, div');
+            if (container && container.querySelector("button[aria-label*='send' i], button[type='submit'], [data-testid*='send' i]")) s += 30;
+            const labelledBy = el.getAttribute('aria-labelledby');
+            if (labelledBy) {
+              const labels = labelledBy.split(/\s+/).map(id => document.getElementById(id)).filter(Boolean);
+              for (const lbl of labels) {
+                const txt = (lbl.innerText || lbl.textContent || '').toLowerCase();
+                if (keywords.some(k => txt.includes(k))) { s += 40; break; }
+                if (searchWords.some(k => txt.includes(k))) { s -= 120; break; }
+              }
+            }
+            return s;
+          };
+
+          let best = null, bestScore = -1;
+          for (const el of candidates) {
+            const sc = scoreEl(el);
+            if (sc > bestScore) {
+              best = el;
+              bestScore = sc;
+            }
+          }
+
+          clearMarks(document);
+          if (best) {
+            try { best.setAttribute('data-__agent','1'); } catch (err) {}
+            return {ok:true};
+          }
+          return {ok:false};
+        })()
+        """
+
+        try:
+            res = await frame.evaluate(js)
+        except Exception:
+            return None
+        if not res or not res.get("ok"):
+            return None
+        try:
+            return frame.locator("[data-__agent='1']").first
+        except Exception:
+            return None
+
     host = (urlparse(page.url).hostname or "").lower()
 
-    # Spezieller Pfad für WhatsApp: der eigentliche Composer sitzt mittig im Layout.
-    if "web.whatsapp.com" in host:
-        wa_locator = page.locator("[data-testid='conversation-compose-box-input'] [contenteditable='true']").first
-        if await wa_locator.count():
-            marked = await _mark_locator(wa_locator)
-            if marked:
-                return marked
-        # Fallback: bekannte data-tab Werte des Composer-Bereichs
-        wa_locator = page.locator("div[contenteditable='true'][data-tab='10']").first
-        if await wa_locator.count():
-            marked = await _mark_locator(wa_locator)
-            if marked:
-                return marked
-
-    js = r"""
-    (() => {
-      const isVisible = (el) => {
-        const r = el.getBoundingClientRect();
-        const st = getComputedStyle(el);
-        return r.width > 20 && r.height > 16 && st.visibility !== 'hidden' && st.display !== 'none';
-      };
-      const keywords = [
-        'message','nachricht','reply','antwort','write a message','type a message',
-        'gib eine nachricht ein','messaggio','mensaje','mensagem','メッセージ','сообщение'
-      ];
-      const searchWords = ['search','suche','suchen','buscar','recherche','поиск','pesquisa'];
-      const cands = Array.from(document.querySelectorAll(
-        "textarea, input[type='text']:not([type='search']), [contenteditable='true']"
-      ));
-      const scoreEl = (el) => {
-        if (!isVisible(el)) return -1;
-        let s = 0;
-        const rect = el.getBoundingClientRect();
-        const vh = window.innerHeight;
-        const distBottom = Math.abs(vh - rect.bottom);
-        // näher am unteren Rand → besser
-        s += Math.max(0, 100 - Math.min(100, distBottom));
-        if (el.isContentEditable) s += 40;
-        if (el.tagName === 'TEXTAREA') s += 30;
-        const attrs = (
-          (el.getAttribute('placeholder')||'') + ' ' +
-          (el.getAttribute('data-placeholder')||'') + ' ' +
-          (el.getAttribute('aria-label')||'') + ' ' +
-          (el.getAttribute('role')||'')
-        ).toLowerCase();
-        if (keywords.some(k => attrs.includes(k))) s += 60;
-        if (searchWords.some(k => attrs.includes(k))) s -= 120;
-        const type = (el.getAttribute('type')||'').toLowerCase();
-        if (type === 'search') s -= 120;
-        const dataTab = (el.getAttribute('data-tab')||'').toLowerCase();
-        if (dataTab === '3') s -= 200; // WhatsApp Suchfeld
-        if (['6','7','9','10','11'].includes(dataTab)) s += 50; // WhatsApp Composer-Bereich
-        // Ausschlüsse: Header/Search-Bereiche
-        if (el.closest('header, [role="search"], [data-testid*="search" i], [aria-label*="such" i], [aria-label*="search" i]')) s -= 150;
-        if (el.closest('[data-testid="chat-list-search"]')) s -= 200;
-        // Bonus: im Footer/Composer-Bereich
-        if (el.closest('footer')) s += 30;
-        // Bonus: Send-Button in der Nähe
-        const container = el.closest('form, footer, section, div');
-        if (container && container.querySelector("button[aria-label*='send' i], button[type='submit'], [data-testid*='send' i]")) s += 25;
-        return s;
-      };
-      let best = null, bestScore = -1;
-      for (const el of cands) {
-        const sc = scoreEl(el);
-        if (sc > bestScore) { best = el; bestScore = sc; }
-      }
-      document.querySelectorAll('[data-__agent]').forEach(e => e.removeAttribute('data-__agent'));
-      if (best) { best.setAttribute('data-__agent','1'); return {ok:true}; }
-      return {ok:false};
-    })()
-    """
-    res = await page.evaluate(js)
-    if not res or not res.get('ok'):
-        return None
+    seen_frames = set()
+    frames_to_check = []
     try:
-        return page.locator("[data-__agent='1']").first
+        main_frame = page.main_frame
     except Exception:
-        return None
+        main_frame = None
+    if main_frame:
+        frames_to_check.append(main_frame)
+        seen_frames.add(main_frame)
+
+    for fr in getattr(page, "frames", []):
+        if fr is None or fr in seen_frames:
+            continue
+        frames_to_check.append(fr)
+        seen_frames.add(fr)
+
+    for frame in frames_to_check:
+        loc = await _try_frame(frame, host)
+        if loc:
+            return loc
+
+    return None
 
 
 async def _focus_locator_with_retries(loc, attempts: int = 3, delay: float = 0.25) -> bool:
