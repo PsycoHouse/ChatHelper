@@ -1010,10 +1010,23 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
     if "web.whatsapp.com" in host:
         js = r"""
         (() => {
-          // Alle Message-Container einsammeln (neue & alte DOMs)
-          const containers = Array.from(document.querySelectorAll(
-            "[data-testid='conversation-panel-body'] [data-testid='msg-container'], [data-testid='msg-container']"
-          ));
+          const ACTIVE_CHAT_SELECTORS = [
+            "[data-testid='conversation-panel-body']",
+            "[data-testid='conversation-panel']",
+            "[data-testid='conversation-panel-messages']",
+            "[data-testid='pane-chat-body']",
+            "[aria-label='Nachrichten']",
+            "[aria-label='Conversation thread']",
+          ];
+
+          const isInActiveChat = (el) => {
+            return ACTIVE_CHAT_SELECTORS.some(sel => el.closest(sel));
+          };
+
+          // Alle Message-Container einsammeln (neue & alte DOMs), dabei die Chatliste links ignorieren
+          const containers = Array.from(document.querySelectorAll("[data-testid='msg-container']"))
+            .filter(c => isInActiveChat(c));
+
           for (let i = containers.length - 1; i >= 0; i--) {
             const c = containers[i];
             const isIncoming = c.classList.contains("message-in") || !!c.querySelector("[data-pre-plain-text]");
