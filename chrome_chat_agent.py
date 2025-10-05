@@ -28,6 +28,9 @@ except Exception:
 
 console = Console()
 
+# Versionshinweis für die CMD-Ausgabe
+AGENT_VERSION = "1.0.0"
+
 # -------------------- Konfiguration ------------------------------------------
 ASK_CONFIRM      = False  # keine Rückfragen vor Aktionen
 AUTO_SEND        = True   # nach Tippen automatisch senden (domain-spezifisch)
@@ -52,6 +55,7 @@ _last_sent_time: float = 0.0
 _ECHO_COOLDOWN_SEC = 10.0  # innerhalb dieses Fensters niemals auf eigenen Text antworten
 
 # -------------------- Transparenz-Hinweis ------------------------------------
+console.print(f"[bold green]ChatHelper CMD Version {AGENT_VERSION}[/bold green]")
 console.print("[bold red]⚠ Achtung:[/bold red] Diese Sitzung wird von einer [bold]AI[/bold] unterstützt.")
 console.print("Alle Aktionen im Chrome-Browser laufen über dieses Agent-Skript. Bitte bestätige riskante Schritte bewusst.\n")
 
