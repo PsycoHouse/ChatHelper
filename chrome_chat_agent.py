@@ -1463,18 +1463,100 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
           const containers = Array.from(document.querySelectorAll("[data-testid='msg-container']"))
             .filter(c => isInActiveChat(c));
 
+          const gatherText = (root) => {
+            if (!root) return "";
+            const fallback = () => {
+              try {
+                const value = (root.innerText || root.textContent || "").trim();
+                return value;
+              } catch (err) {
+                return "";
+              }
+            };
+
+            try {
+              const NodeFilterRef = window.NodeFilter || { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 };
+              const filter = {
+                acceptNode(node) {
+                  if (!node || !node.nodeValue || !node.nodeValue.trim()) {
+                    return NodeFilterRef.FILTER_REJECT || 2;
+                  }
+                  let parent = node.parentElement;
+                  while (parent) {
+                    try {
+                      if (parent.getAttribute && parent.getAttribute("aria-hidden") === "true") {
+                        return NodeFilterRef.FILTER_REJECT || 2;
+                      }
+                      const dataIcon = parent.getAttribute && parent.getAttribute("data-icon");
+                      if (dataIcon) return NodeFilterRef.FILTER_REJECT || 2;
+                      const dataTestId = parent.getAttribute && parent.getAttribute("data-testid");
+                      if (dataTestId && /(reaction|icon|emoji|timestamp)/i.test(dataTestId)) {
+                        return NodeFilterRef.FILTER_REJECT || 2;
+                      }
+                      if (parent.matches && parent.matches("button, svg, [role='img'], [role='button']")) {
+                        return NodeFilterRef.FILTER_REJECT || 2;
+                      }
+                      const style = window.getComputedStyle ? window.getComputedStyle(parent) : null;
+                      if (style && (style.display === "none" || style.visibility === "hidden")) {
+                        return NodeFilterRef.FILTER_REJECT || 2;
+                      }
+                    } catch (err) {
+                      return NodeFilterRef.FILTER_REJECT || 2;
+                    }
+                    parent = parent.parentElement;
+                  }
+                  return NodeFilterRef.FILTER_ACCEPT || 1;
+                }
+              };
+              const walker = document.createTreeWalker(
+                root,
+                NodeFilterRef.SHOW_TEXT || 4,
+                filter,
+                false
+              );
+              if (!walker) return fallback();
+              const chunks = [];
+              let current;
+              while ((current = walker.nextNode())) {
+                const value = (current.nodeValue || "").trim();
+                if (value) chunks.push(value);
+              }
+              if (!chunks.length) return fallback();
+              return chunks.join(" ").trim();
+            } catch (err) {
+              return fallback();
+            }
+          };
+
+          const preferredSelectors = [
+            "[data-testid='msg-text']",
+            ".copyable-text",
+            "[data-pre-plain-text]",
+          ];
+
           for (let i = containers.length - 1; i >= 0; i--) {
             const c = containers[i];
             if (isProbablyOutgoing(c)) continue;
 
             // Text robust extrahieren
             let text = "";
-            const parts = c.querySelectorAll("[data-testid='msg-text'], [dir='ltr'], span, p");
-            for (const el of parts) {
-              const t = (el.innerText || "").trim();
-              if (t) text += (text ? " " : "") + t;
+            for (const sel of preferredSelectors) {
+              const elements = Array.from(c.querySelectorAll(sel));
+              if (!elements.length) continue;
+              for (const el of elements) {
+                const chunk = gatherText(el);
+                if (chunk) {
+                  text += (text ? " " : "") + chunk;
+                }
+              }
+              if (text) break;
             }
-            text = text.trim();
+
+            if (!text) {
+              text = gatherText(c);
+            }
+
+            text = (text || "").trim();
             if (text) return {ok:true, text};
           }
           return {ok:false};
