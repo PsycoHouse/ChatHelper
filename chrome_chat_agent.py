@@ -145,33 +145,92 @@ async def safe_confirm(prompt: str) -> bool:
     return ans.startswith("j") or ans == "y"
 
 # --------------------- Befehle ------------------------------------------------
+async def _ensure_active_page(page):
+    """Stellt sicher, dass wir den sichtbaren Tab referenzieren."""
+    if page is None:
+        return page
+    candidate = None
+    try:
+        ctx = page.context
+    except Exception:
+        ctx = None
+
+    if ctx:
+        try:
+            pages = list(ctx.pages)
+        except Exception:
+            pages = []
+        for p in reversed(pages):  # zuletzt geöffneter Tab zuerst prüfen
+            try:
+                if p.is_closed():
+                    continue
+            except Exception:
+                continue
+            try:
+                url = p.url
+            except Exception:
+                url = ""
+            if url.startswith(("http://", "https://")):
+                candidate = p
+                break
+            if candidate is None:
+                candidate = p
+        if candidate:
+            page = candidate
+
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+    try:
+        await page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        pass
+
+    global _LOCK_HOST
+    try:
+        host = urlparse(page.url).hostname or ""
+    except Exception:
+        host = ""
+    if LOCK_TO_DOMAIN and not _LOCK_HOST and host:
+        _LOCK_HOST = host
+
+    return page
+
+
 async def cmd_lese(page):
+    page = await _ensure_active_page(page)
     data = await read_page(page)
     snippet = shorten(data["text"], 1500)
     console.print(Panel.fit(
         f"[bold]{data['title'] or '(ohne Titel)'}[/bold]\n[url]{data['url']}[/url]\n\n{snippet or '[kein sichtbarer Text]'}",
         title="Seite lesen", border_style="cyan"
     ))
+    return page
 
 async def cmd_gehe(page, url: str):
+    page = await _ensure_active_page(page)
     # Domain-Lock & Chat-Only: Navigation unterbinden
     if FORCE_CHAT_MODE or LOCK_TO_DOMAIN:
         console.print("[yellow]Navigation ist im Chat-Modus gesperrt.[/yellow]")
-        return
+        return page
     if not url.startswith("http"):
         url = "https://" + url
     if await safe_confirm(f"Zu dieser URL navigieren: {url}?"):
         await page.goto(url, wait_until="domcontentloaded")
-        await cmd_lese(page)
+        page = await cmd_lese(page)
+    return page
 
 async def cmd_klicke(page, selector: str):
+    page = await _ensure_active_page(page)
     if not await safe_confirm(f'Klicke Element: {selector}?'):
         console.print("[dim]Abgebrochen.[/dim]")
-        return
+        return page
     loc = page.locator(selector).first
     await loc.scroll_into_view_if_needed()
     await loc.click()
     console.print("[green]Klick ausgeführt.[/green]")
+    return page
 
 # --- Generische Auto-Zielsuche (vermeidet Suchleisten) -----------------------
 async def _find_dom_input(page):
@@ -284,6 +343,7 @@ async def _maybe_auto_send(page):
 
 # --- Tippen -------------------------------------------------------------------
 async def cmd_tippe(page, selector: str, text: str):
+    page = await _ensure_active_page(page)
     selector = (selector or "").strip()
 
     # Domain-Lock: bleib auf der Seite (nur Info-Output)
@@ -422,7 +482,7 @@ async def cmd_tippe(page, selector: str, text: str):
         if last_error:
             err_msg += f" [dim]({last_error})[/dim]"
         console.print(err_msg)
-        return
+        return page
 
     console.print("[green]Text geschrieben.[/green]")
     await _maybe_auto_send(page)
@@ -431,13 +491,17 @@ async def cmd_tippe(page, selector: str, text: str):
     global _last_sent_text, _last_sent_time
     _last_sent_text = text.strip()
     _last_sent_time = time.time()
+    return page
 
 
 async def cmd_scrolle(page, pixels: int):
+    page = await _ensure_active_page(page)
     await page.evaluate("(y) => window.scrollBy(0, y)", pixels)
-    console.print(f"[green]Gescr ollt: {pixels}px.[/green]")
+    console.print(f"[green]Gescrollt: {pixels}px.[/green]")
+    return page
 
 async def cmd_auswahl(page, selector: str):
+    page = await _ensure_active_page(page)
     loc = page.locator(selector)
     count = await loc.count()
     console.print(f"[cyan]Treffer: {count}[/cyan]")
@@ -449,6 +513,7 @@ async def cmd_auswahl(page, selector: str):
             txt = ""
         txt = shorten(txt or "", 200)
         console.print(f"[bold]{i:02d}[/bold]: {txt or '[kein sichtbarer Text]'}")
+    return page
 
 # --------------------- KI-Planung (Stub/LLM) ---------------------------------
 def is_short_chat(text: str) -> bool:
@@ -672,7 +737,7 @@ async def gui_repl(page, gui: GUI):
     console.print(Panel.fit("Tipp: `sag <Text>` oder `tippe :: <Text>` → schreibt direkt ins Nachrichtenfeld.",
                             border_style="green", title="Schnellbefehl"))
 
-    await cmd_lese(page)
+    page = await cmd_lese(page)
 
     # Auto-Responder Task
     auto_task = asyncio.create_task(auto_responder_loop(page, planner))
@@ -696,6 +761,7 @@ async def gui_repl(page, gui: GUI):
 
         # Natürliche Sprache → KI/Stub (liefert genau einen Befehl)
         if raw.split(" ", 1)[0] not in ("lese", "gehe", "klicke", "tippe", "scrolle", "auswahl"):
+            page = await _ensure_active_page(page)
             page_state = await read_page(page)
             context = json.dumps({"url": page_state["url"], "title": page_state["title"]}, ensure_ascii=False)
             suggested = await planner.suggest_command(context=context, user_msg=raw)
@@ -706,13 +772,13 @@ async def gui_repl(page, gui: GUI):
         # Befehl ausführen
         try:
             if raw.startswith("lese"):
-                await cmd_lese(page)
+                page = await cmd_lese(page)
             elif raw.startswith("gehe "):
                 _, url = raw.split(" ", 1)
-                await cmd_gehe(page, url.strip())
+                page = await cmd_gehe(page, url.strip())
             elif raw.startswith("klicke "):
                 _, sel = raw.split(" ", 1)
-                await cmd_klicke(page, sel.strip())
+                page = await cmd_klicke(page, sel.strip())
             elif raw.startswith("tippe "):
                 parts = raw.split("::", 1)
                 if len(parts) == 2:
@@ -726,20 +792,20 @@ async def gui_repl(page, gui: GUI):
                     sel = ""; text = raw.split(" ", 1)[1].strip()
                     if text.startswith(":"):
                         text = text.lstrip(": ")
-                await cmd_tippe(page, sel, text.strip())
+                page = await cmd_tippe(page, sel, text.strip())
             elif raw.startswith("scrolle "):
                 _, num = raw.split(" ", 1)
-                await cmd_scrolle(page, int(num.strip()))
+                page = await cmd_scrolle(page, int(num.strip()))
             elif raw.startswith("auswahl "):
                 _, sel = raw.split(" ", 1)
-                await cmd_auswahl(page, sel.strip())
+                page = await cmd_auswahl(page, sel.strip())
             else:
                 console.print("[red]Unbekannter Befehl. Tippe 'hilfe' im Chat-Fenster.[/red]")
         except Exception as e:
             console.print(f"[red]Fehler:[/red] {e}")
 
     auto_task.cancel()
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(asyncio.CancelledError, Exception):
         await auto_task
 
 # --------------------- Auto-Responder ----------------------------------------
@@ -810,6 +876,7 @@ async def auto_responder_loop(page, planner: LLMPlanner):
     while True:
         try:
             if AUTO_MODE:
+                page = await _ensure_active_page(page)
                 host = (urlparse(page.url).hostname or "").lower()
                 if AUTO_DOMAINS.get(host, False):
                     latest = await extract_latest_incoming_message(page)
@@ -835,7 +902,7 @@ async def auto_responder_loop(page, planner: LLMPlanner):
                             # kleine natürliche Verzögerung
                             await asyncio.sleep(random.uniform(AUTO_MIN_REPLY_DELAY, AUTO_MAX_REPLY_DELAY))
 
-                            await cmd_tippe(page, "", reply)
+                            page = await cmd_tippe(page, "", reply)
                             _last_seen_messages[key] = latest
 
             await asyncio.sleep(AUTO_POLL_SECONDS)
