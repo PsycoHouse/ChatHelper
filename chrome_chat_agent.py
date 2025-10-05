@@ -47,6 +47,24 @@ AUTO_DOMAINS          = {
     "bumble.com": True,
 }
 
+CHAT_DOMAINS = set(AUTO_DOMAINS.keys())
+CHAT_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "web.whatsapp.com": ("whatsapp", "wa"),
+    "bumble.com": ("bumble",),
+}
+DEFAULT_PROMPT_KEYWORDS = (
+    "schreib",
+    "schreibe",
+    "sage",
+    "sag",
+    "antworte",
+    "antwort",
+    "antworten",
+    "reply",
+    "message",
+    "nachricht",
+)
+
 _DEBUG_PORT = 9222
 _LOCK_HOST  = ""  # wird in connect_chrome gesetzt
 
@@ -202,6 +220,13 @@ async def _ensure_active_page(page):
     return page
 
 
+def _hostname(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
 async def cmd_lese(page):
     page = await _ensure_active_page(page)
     data = await read_page(page)
@@ -352,6 +377,23 @@ async def _find_dom_input(page):
     except Exception:
         return None
 
+
+async def _focus_locator_with_retries(loc, attempts: int = 3, delay: float = 0.25) -> bool:
+    """Versucht wiederholt, einen Locator zu fokussieren."""
+
+    for attempt in range(attempts):
+        try:
+            await loc.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        try:
+            await loc.click()
+            return True
+        except Exception:
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay)
+    return False
+
 # --- Auto-Senden --------------------------------------------------------------
 async def _maybe_auto_send(page):
     if not AUTO_SEND:
@@ -449,14 +491,9 @@ async def cmd_tippe(page, selector: str, text: str):
             return False
         return normalized_expected in current or current.endswith(normalized_expected)
 
-    try:
-        await loc.scroll_into_view_if_needed()
-    except Exception:
-        pass
-    try:
-        await loc.click()
-    except Exception:
-        pass
+    focused = await _focus_locator_with_retries(loc)
+    if not focused:
+        console.print("[yellow]Konnte Eingabefeld nicht zuverlässig fokussieren.[/yellow]")
     # contenteditable hat oft kein .fill()
     try:
         await loc.fill("")
@@ -626,6 +663,47 @@ class LLMPlanner:
         except Exception as e:
             console.print(f"[yellow]KI-Fehler → nutze Stub:[/yellow] {e}")
             return await call_llm_stub(context, user_msg)
+
+
+async def _maybe_reuse_existing_page(page, command: str, prompt: str) -> str:
+    """Verhindert unnötige Reloads, wenn wir bereits auf der Zielseite sind."""
+
+    if not command or not command.startswith("gehe "):
+        return command
+
+    current_host = _hostname(getattr(page, "url", ""))
+    target = command.split(" ", 1)[1].strip()
+    if not target:
+        return command
+    if not target.startswith("http"):
+        target = f"https://{target}"
+    target_host = _hostname(target)
+
+    if not prompt.strip():
+        return command
+
+    if not _should_reuse_existing_page(current_host, target_host, prompt):
+        return command
+
+    console.print(
+        f"[cyan]Bereits auf {target_host} – benutze bestehendes Eingabefeld statt neu zu laden.[/cyan]"
+    )
+    return f"tippe :: {prompt.strip()}"
+
+
+def _should_reuse_existing_page(current_host: str, target_host: str, prompt: str) -> bool:
+    if not current_host or not target_host or current_host != target_host:
+        return False
+
+    low_prompt = prompt.lower()
+    domain_keywords = CHAT_DOMAIN_KEYWORDS.get(current_host, tuple())
+
+    if current_host in CHAT_DOMAINS:
+        return True
+
+    keywords = DEFAULT_PROMPT_KEYWORDS + domain_keywords
+    return any(word in low_prompt for word in keywords)
+
 
 # Antwort-LLM für Auto-Responder
 async def generate_reply(planner: "LLMPlanner", history_snippet: str, last_msg: str) -> str:
@@ -813,6 +891,7 @@ async def gui_repl(page, gui: GUI):
             page_state = await read_page(page)
             context = json.dumps({"url": page_state["url"], "title": page_state["title"]}, ensure_ascii=False)
             suggested = await planner.suggest_command(context=context, user_msg=raw)
+            suggested = await _maybe_reuse_existing_page(page, suggested, raw)
             console.print(f"[dim]Vorgeschlagener Befehl:[/dim] {suggested}")
             gui._log_history("KI", suggested)
             raw = suggested
