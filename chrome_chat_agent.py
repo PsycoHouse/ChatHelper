@@ -1468,72 +1468,13 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
             if (isProbablyOutgoing(c)) continue;
 
             // Text robust extrahieren
-            const gatherText = (root) => {
-              const collector = [];
-              const walker = document.createTreeWalker(
-                root,
-                NodeFilter.SHOW_TEXT,
-                {
-                  acceptNode(node) {
-                    if (!node || !node.nodeValue || !node.nodeValue.trim()) {
-                      return NodeFilter.FILTER_REJECT;
-                    }
-                    let parent = node.parentElement;
-                    while (parent) {
-                      try {
-                        if (parent.getAttribute && parent.getAttribute("aria-hidden") === "true") {
-                          return NodeFilter.FILTER_REJECT;
-                        }
-                        const dataIcon = parent.getAttribute && parent.getAttribute("data-icon");
-                        if (dataIcon) return NodeFilter.FILTER_REJECT;
-                        const dataTestId = parent.getAttribute && parent.getAttribute("data-testid");
-                        if (dataTestId && /(reaction|icon|emoji|timestamp)/i.test(dataTestId)) {
-                          return NodeFilter.FILTER_REJECT;
-                        }
-                        if (parent.matches && parent.matches("button, svg, [role='img'], [role='button']")) {
-                          return NodeFilter.FILTER_REJECT;
-                        }
-                        const style = window.getComputedStyle ? window.getComputedStyle(parent) : null;
-                        if (style && (style.display === "none" || style.visibility === "hidden")) {
-                          return NodeFilter.FILTER_REJECT;
-                        }
-                      } catch (err) {
-                        return NodeFilter.FILTER_REJECT;
-                      }
-                      parent = parent.parentElement;
-                    }
-                    return NodeFilter.FILTER_ACCEPT;
-                  }
-                }
-              );
-              let current;
-              while ((current = walker.nextNode())) {
-                const value = (current.nodeValue || "").trim();
-                if (value) collector.push(value);
-              }
-              return collector.join(" ").trim();
-            };
-
-            const preferredSelectors = [
-              "[data-testid='msg-text']",
-              ".copyable-text",
-              "[data-pre-plain-text]",
-            ];
             let text = "";
-            for (const sel of preferredSelectors) {
-              const elements = Array.from(c.querySelectorAll(sel));
-              for (const el of elements) {
-                const chunk = gatherText(el);
-                if (chunk) {
-                  text += (text ? " " : "") + chunk;
-                }
-              }
-              if (text) break;
+            const parts = c.querySelectorAll("[data-testid='msg-text'], [dir='ltr'], span, p");
+            for (const el of parts) {
+              const t = (el.innerText || "").trim();
+              if (t) text += (text ? " " : "") + t;
             }
-            if (!text) {
-              text = gatherText(c);
-            }
-            text = (text || "").trim();
+            text = text.trim();
             if (text) return {ok:true, text};
           }
           return {ok:false};
