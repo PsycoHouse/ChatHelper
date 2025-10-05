@@ -762,13 +762,17 @@ async def compose_chat_reply(page, planner: "LLMPlanner", instruction: str) -> O
         return None
 
     latest = await extract_latest_incoming_message(page)
-    snap = await read_page(page)
-    snippet = shorten(snap.get("text", ""), 600)
+    history = await extract_chat_history(page, max_messages=12)
 
-    if not latest and not snippet:
+    snippet_source = history
+    if not snippet_source:
+        snap = await read_page(page)
+        snippet_source = shorten(snap.get("text", ""), 600)
+
+    if not latest and not snippet_source:
         return None
 
-    reply = await generate_reply(planner, snippet, latest or "", instruction)
+    reply = await generate_reply(planner, snippet_source, latest or "", instruction)
     if reply:
         return reply.strip()
     return None
@@ -1098,6 +1102,78 @@ async def extract_latest_incoming_message(page) -> Optional[str]:
                         return txt.strip()
                 except Exception:
                     pass
+
+    return None
+
+
+async def extract_chat_history(page, max_messages: int = 12) -> Optional[str]:
+    """Erzeugt einen kurzen Chat-Auszug (inkl. Sprecher), falls verfügbar."""
+    host = (urlparse(page.url).hostname or "").lower()
+
+    if "web.whatsapp.com" in host:
+        js = r"""
+        (limit) => {
+          const ACTIVE_CHAT_SELECTORS = [
+            "[data-testid='conversation-panel-body']",
+            "[data-testid='conversation-panel']",
+            "[data-testid='conversation-panel-messages']",
+            "[data-testid='pane-chat-body']",
+            "[aria-label='Nachrichten']",
+            "[aria-label='Conversation thread']",
+          ];
+
+          const isInActiveChat = (el) => {
+            return ACTIVE_CHAT_SELECTORS.some(sel => el.closest(sel));
+          };
+
+          const containers = Array.from(document.querySelectorAll("[data-testid='msg-container']"))
+            .filter((c) => isInActiveChat(c));
+
+          const take = containers.slice(-Math.max(1, limit));
+          const items = [];
+
+          const extractText = (node) => {
+            let text = "";
+            const parts = node.querySelectorAll("[data-testid='msg-text'], [dir='ltr'], span, p");
+            for (const el of parts) {
+              const t = (el.innerText || "").trim();
+              if (t) text += (text ? " " : "") + t;
+            }
+            return text.trim();
+          };
+
+          for (const c of take) {
+            const isIncoming = c.classList.contains("message-in") || !!c.querySelector("[data-pre-plain-text]");
+            const isOutgoing = c.classList.contains("message-out");
+            let role = null;
+            if (isOutgoing) role = "me";
+            else if (isIncoming) role = "them";
+            if (!role) continue;
+
+            const text = extractText(c);
+            if (!text) continue;
+
+            items.push({ role, text });
+          }
+
+          return { ok: items.length > 0, items };
+        }
+        """
+        try:
+            res = await page.evaluate(js, max_messages)
+        except Exception:
+            res = None
+
+        if res and res.get("ok") and res.get("items"):
+            lines = []
+            for item in res["items"]:
+                role = "Du" if item.get("role") == "me" else "Gegenüber"
+                text = item.get("text", "").strip()
+                if text:
+                    lines.append(f"{role}: {text}")
+            if lines:
+                summary = "\n".join(lines)
+                return shorten(summary, 800)
 
     return None
 
